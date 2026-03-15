@@ -22,8 +22,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-API_KEY = "oGu4GwBib9t9RSH7AT1foVPb9oAu26ZwunLP9RrXz5Nmd6YfU6xJXnWxHWDcXuSe"
-API_SECRET = "DroKnMLPkkZf3Jv1Iq1itXIl10zadIcU1VuXdjr3mEZIfx4bdb6qaHu7eRt3izSF"
 
 def demo_risk_calculations():
     """
@@ -200,9 +198,8 @@ def demo_real_trading():
     print("═" * 60)
 
     # 填入你的测试网 API Key
-    # API_KEY = os.getenv("BINANCE_TESTNET_API_KEY", "")
-    # API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET", "")
-    
+    API_KEY = os.getenv("BINANCE_TESTNET_API_KEY", "")
+    API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET", "")
 
     if not API_KEY or not API_SECRET:
         print("  未设置测试网 API Key，跳过真实下单演示")
@@ -268,8 +265,8 @@ def demo_signal_engine():
     print("  演示：多时间框架信号引擎")
     print("═" * 60)
 
-    # API_KEY = os.getenv("BINANCE_TESTNET_API_KEY", "")
-    # API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+    API_KEY = os.getenv("BINANCE_TESTNET_API_KEY", "")
+    API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET", "")
 
     if not API_KEY:
         print("  未设置 API Key，跳过")
