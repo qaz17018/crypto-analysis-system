@@ -4,3 +4,4 @@ pandas-ta==0.4.71b0
 numpy>=2.2.6
 aiohttp>=3.10.0
 python-dotenv==1.0.1
+yfinance

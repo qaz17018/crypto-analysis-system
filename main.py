@@ -1,20 +1,14 @@
 """
-主入口 - 风控层完整演示
-展示从信号输入到下单执行的完整流程
-
-运行方式：
-    python main.py
-
-测试网 API Key 申请：
-    https://testnet.binancefuture.com → 注册 → API Management
+主入口
+完整流程：信号引擎分析 → 风控评估 → 确认入场 → 自动下单
 """
 
 import logging
 import os
-from core.risk_manager import RiskManager, TradeDirection
-from core.binance_executor import BinanceFuturesExecutor
+from dotenv import load_dotenv
 
-# ── 日志配置 ──────────────────────────────────────────────────────────
+load_dotenv()  # 自动读取 .env 文件
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -22,286 +16,157 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+API_KEY = os.getenv("BINANCE_TESTNET_API_KEY", "")
+API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET", "")
 
-def demo_risk_calculations():
-    """
-    演示1：风控计算逻辑（不需要 API Key）
-    验证各种情况下的拒绝和通过逻辑
-    """
-    print("\n" + "═" * 60)
-    print("  演示：风控计算逻辑验证")
-    print("═" * 60)
 
-    # 假设你重新开始，初始资金 500 USDT
+def run():
+    if not API_KEY or not API_SECRET:
+        print("未设置 API Key，请检查 .env 文件")
+        return
+
+    from binance.client import Client
+    from core.signal_engine import SignalEngine, SignalResult
+    from core.risk_manager import RiskManager, TradeDirection
+    from core.binance_executor import BinanceFuturesExecutor
+    from core.market_analyzer import Signal
+
+    client = Client(API_KEY, API_SECRET, testnet=True)
     risk = RiskManager(
         total_capital_usdt=500,
-        max_loss_pct_per_trade=0.015,  # 单笔最大亏损 1.5% = 7.5 USDT
-        max_daily_loss_pct=0.05,  # 日亏损上限 5% = 25 USDT
-        max_leverage=3,  # 最高 3 倍，保守起步
+        max_loss_pct_per_trade=0.015,
+        max_daily_loss_pct=0.05,
+        max_leverage=3,
         min_risk_reward_ratio=1.5,
         min_confidence_score=65,
     )
-    risk.print_risk_summary()
-
-    # ── 场景1：正常入场，应该通过 ─────────────────────────────────────
-    print("场景1：BTC 正常做多信号")
-    decision = risk.evaluate_trade(
-        symbol="BTCUSDT",
-        direction=TradeDirection.LONG,
-        entry_price=95000,
-        stop_loss_price=93100,  # 止损距离 2%
-        take_profit_price=98850,  # 止盈距离 4.05%，盈亏比约 2:1
-        leverage=3,
-        confidence_score=72,
-        funding_rate_8h=0.0001,  # 年化约 10.95%，正常水平
-    )
-    _print_decision(decision)
-
-    # ── 场景2：资金费率过高，拒绝做多 ────────────────────────────────
-    print("\n场景2：资金费率过高（牛市顶部常见）")
-    decision = risk.evaluate_trade(
-        symbol="BTCUSDT",
-        direction=TradeDirection.LONG,
-        entry_price=95000,
-        stop_loss_price=93100,
-        take_profit_price=98850,
-        leverage=3,
-        confidence_score=70,
-        funding_rate_8h=0.0015,  # 年化约 164%，过热信号
-    )
-    _print_decision(decision)
-
-    # ── 场景3：置信度不足，信号冲突 ──────────────────────────────────
-    print("\n场景3：多维度信号冲突，置信度不足")
-    decision = risk.evaluate_trade(
-        symbol="ETHUSDT",
-        direction=TradeDirection.LONG,
-        entry_price=3500,
-        stop_loss_price=3430,
-        take_profit_price=3640,
-        leverage=2,
-        confidence_score=55,  # 低于最低要求 65
-        funding_rate_8h=0.0001,
-    )
-    _print_decision(decision)
-
-    # ── 场景4：盈亏比不足 ─────────────────────────────────────────────
-    print("\n场景4：止盈太近，盈亏比不合格")
-    decision = risk.evaluate_trade(
-        symbol="BTCUSDT",
-        direction=TradeDirection.LONG,
-        entry_price=95000,
-        stop_loss_price=93100,  # 止损 2%
-        take_profit_price=96000,  # 止盈只有 1%，盈亏比 0.5:1
-        leverage=3,
-        confidence_score=75,
-        funding_rate_8h=0.0001,
-    )
-    _print_decision(decision)
-
-    # ── 场景5：模拟日亏损触发上限 ────────────────────────────────────
-    print("\n场景5：今日已亏损较多，触发日亏损保护")
-    risk.daily_loss_usdt = 24.0  # 模拟今天已亏 24 USDT（接近 5% = 25 USDT 上限）
-    decision = risk.evaluate_trade(
-        symbol="BTCUSDT",
-        direction=TradeDirection.LONG,
-        entry_price=95000,
-        stop_loss_price=93100,
-        take_profit_price=98850,
-        leverage=3,
-        confidence_score=80,
-        funding_rate_8h=0.0001,
-    )
-    _print_decision(decision)
-    risk.daily_loss_usdt = 0  # 重置
-
-
-def demo_full_flow_dry_run():
-    """
-    演示2：完整流程空跑（使用假数据，不真实下单）
-    展示信号 → 风控 → 执行的完整链路
-    """
-    print("\n" + "═" * 60)
-    print("  演示：完整交易流程（空跑模式）")
-    print("═" * 60)
-
-    # 假设分析系统输出了以下信号
-    signal = {
-        "symbol": "BTCUSDT",
-        "direction": TradeDirection.LONG,
-        "entry_price": 95000.0,
-        "stop_loss_price": 93100.0,  # 关键支撑位下方
-        "take_profit_price": 98900.0,  # 前高附近
-        "leverage": 3,
-        "confidence_score": 73,  # 多时间框架对齐，无明显信号冲突
-        "funding_rate_8h": 0.00008,  # 当前费率健康
-    }
-
-    print(f"\n收到分析信号：")
-    print(f"  方向:     {signal['direction'].value}")
-    print(f"  入场价:   ${signal['entry_price']:,.0f}")
-    print(
-        f"  止损价:   ${signal['stop_loss_price']:,.0f}  (距离 {(signal['entry_price']-signal['stop_loss_price'])/signal['entry_price']:.2%})"
-    )
-    print(
-        f"  止盈价:   ${signal['take_profit_price']:,.0f}  (距离 {(signal['take_profit_price']-signal['entry_price'])/signal['entry_price']:.2%})"
-    )
-    print(f"  置信度:   {signal['confidence_score']}/100")
-    print(f"  资金费率: {signal['funding_rate_8h']*3*365:.2%} 年化")
-
-    # 风控评估
-    risk = RiskManager(total_capital_usdt=500)
-    decision = risk.evaluate_trade(**signal)
-
-    print(f"\n风控结果：{'✓ 通过' if decision.approved else '✗ 拒绝'}")
-    print(f"  {decision.message}")
-
-    if decision.approved and decision.params:
-        p = decision.params
-        margin = p.position_usdt / p.leverage
-        print(f"\n计算出的交易参数：")
-        print(f"  开仓名义价值:  {p.position_usdt:>10.2f} USDT")
-        print(f"  实际保证金:    {margin:>10.2f} USDT  ({margin/500:.1%} 的总资金)")
-        print(
-            f"  最大亏损:      {p.max_loss_usdt:>10.2f} USDT  ({p.max_loss_usdt/500:.1%} 的总资金)"
-        )
-        print(f"  盈亏比:        {p.risk_reward_ratio:>9.2f}:1")
-        print(f"  移动止盈回撤:  {p.trailing_stop_pct:>9.1%}")
-        print(f"\n  → 如果确认入场，系统将自动：")
-        print(
-            f"     1. 以市价开 {p.position_usdt:.0f} USDT {p.direction.value} 仓（{p.leverage}x 杠杆）"
-        )
-        print(f"     2. 同步挂止损单（触发价 ${p.stop_loss_price:,.0f}，标记价格触发）")
-        print(f"     3. 同步挂止盈单（触发价 ${p.take_profit_price:,.0f}）")
-        print(f"     4. 你不需要做任何其他操作")
-
-
-def _print_decision(decision):
-    status = "✓ 通过" if decision.approved else "✗ 拒绝"
-    print(f"  结果：{status}")
-    print(f"  信息：{decision.message}")
-    if decision.approved and decision.params:
-        p = decision.params
-        margin = p.position_usdt / p.leverage
-        print(
-            f"  建议仓位：{p.position_usdt:.2f} USDT | 保证金：{margin:.2f} USDT | 盈亏比：{p.risk_reward_ratio:.2f}:1"
-        )
-
-
-def demo_real_trading():
-    """
-    演示3：真实下单（需要测试网 API Key）
-    取消注释并填入你的测试网 API Key 才能运行
-    """
-    print("\n" + "═" * 60)
-    print("  真实下单演示（测试网）")
-    print("═" * 60)
-
-    # 填入你的测试网 API Key
-    API_KEY = os.getenv("BINANCE_TESTNET_API_KEY", "")
-    API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET", "")
-
-    if not API_KEY or not API_SECRET:
-        print("  未设置测试网 API Key，跳过真实下单演示")
-        print("  设置方法：")
-        print("    export BINANCE_TESTNET_API_KEY=你的Key")
-        print("    export BINANCE_TESTNET_API_SECRET=你的Secret")
-        print("  申请地址：https://testnet.binancefuture.com")
-        return
-
     executor = BinanceFuturesExecutor(API_KEY, API_SECRET, testnet=True)
-    risk = RiskManager(total_capital_usdt=500)
 
-    # 获取当前实时数据
-    symbol = "BTCUSDT"
-    funding_rate = executor.get_funding_rate(symbol)
-    mark_price = executor.get_mark_price(symbol)
+    # ── 第一步：信号引擎分析 ──────────────────────────────────────────
+    print("\n" + "═" * 60)
+    print("  第一步：多时间框架信号分析")
+    print("═" * 60)
 
-    if mark_price <= 0:
-        print("无法获取价格，取消演示")
+    symbol = "ETHUSDT"  # 可以改成 ETHUSDT 测试
+    engine = SignalEngine(client, symbol)
+    signal_result: SignalResult = engine.analyze()
+
+    print(signal_result.analysis_summary)
+
+    # ── 第二步：风控评估 ──────────────────────────────────────────────
+    print("\n" + "═" * 60)
+    print("  第二步：风控评估")
+    print("═" * 60)
+
+    if signal_result.direction == Signal.NEUTRAL:
+        print("当前信号为中性，无方向，系统建议等待")
         return
 
-    print(f"\n当前 {symbol} 标记价格: ${mark_price:,.2f}")
-    print(f"当前资金费率: {funding_rate:.6f} (年化 {funding_rate*3*365:.2%})")
+    direction = (
+        TradeDirection.LONG
+        if signal_result.direction == Signal.LONG
+        else TradeDirection.SHORT
+    )
 
-    # 基于实时价格构建测试信号
-    stop_loss = mark_price * 0.98  # 止损 2%
-    take_profit = mark_price * 1.04  # 止盈 4%
+    funding_rate = executor.get_funding_rate(symbol)
 
     decision = risk.evaluate_trade(
         symbol=symbol,
-        direction=TradeDirection.LONG,
-        entry_price=mark_price,
-        stop_loss_price=stop_loss,
-        take_profit_price=take_profit,
+        direction=direction,
+        entry_price=signal_result.entry_price,
+        stop_loss_price=signal_result.suggested_stop_loss,
+        take_profit_price=signal_result.suggested_take_profit,
         leverage=3,
-        confidence_score=70,
+        confidence_score=signal_result.confidence_score,
         funding_rate_8h=funding_rate,
     )
 
+    print(f"风控结果：{'✓ 通过' if decision.approved else '✗ 拒绝'}")
+    print(f"原因：{decision.message}")
+
     if not decision.approved:
-        print(f"\n风控拒绝：{decision.message}")
         return
 
-    print(f"\n风控通过：{decision.message}")
-    print("准备在测试网下单...")
+    p = decision.params
+    margin = p.position_usdt / p.leverage
+    print(f"\n交易参数：")
+    print(f"  方向:         {direction.value}")
+    print(f"  置信度:       {signal_result.confidence_score}/100")
+    print(f"  入场价:       ${p.entry_price:,.2f}")
+    print(
+        f"  止损价:       ${p.stop_loss_price:,.2f}  ({abs(p.stop_loss_price - p.entry_price)/p.entry_price:.2%})"
+    )
+    print(
+        f"  止盈价:       ${p.take_profit_price:,.2f}  ({abs(p.take_profit_price - p.entry_price)/p.entry_price:.2%})"
+    )
+    print(f"  盈亏比:       {p.risk_reward_ratio:.2f}:1")
+    print(f"  开仓名义值:   ${p.position_usdt:.2f} USDT")
+    print(f"  实际保证金:   ${margin:.2f} USDT")
+    print(f"  最大亏损:     ${p.max_loss_usdt:.2f} USDT")
 
-    result = executor.open_position_with_guards(decision.params)
+    if signal_result.has_major_conflict:
+        print(f"\n  ⚠ 警告：检测到重大信号冲突，建议谨慎")
+        for c in signal_result.timeframe_conflicts:
+            print(f"    - {c}")
+
+    # ── 第三步：人工确认入场 ──────────────────────────────────────────
+    print("\n" + "═" * 60)
+    print("  第三步：确认入场")
+    print("═" * 60)
+    print("  系统已完成分析，等待你的决定")
+    print("  输入 y 确认入场，其他任意键跳过：", end="")
+    confirm = input().strip().lower()
+
+    if confirm != "y":
+        print("已跳过，等待下一个信号")
+        return
+
+    # ── 第四步：自动下单 ──────────────────────────────────────────────
+    print("\n" + "═" * 60)
+    print("  第四步：执行下单")
+    print("═" * 60)
+
+    result = executor.open_position_with_guards(p)
 
     if result.success:
-        print(f"\n开仓成功！")
+        print(f"\n开仓成功 ✓")
         print(f"  主单ID:   {result.entry_order.order_id}")
         print(f"  止损单ID: {result.stop_loss_order.order_id}")
         print(
-            f"  止盈单ID: {result.take_profit_order.order_id if result.take_profit_order else '未挂'}"
+            f"  止盈单ID: {result.take_profit_order.order_id if result.take_profit_order and result.take_profit_order.success else '未挂，请手动补挂'}"
         )
+        print(f"\n  止损和止盈已自动挂单，无需再盯盘")
     else:
         print(f"\n开仓失败：{result.error_message}")
 
 
-def demo_signal_engine():
-    """演示3：信号引擎分析（需要测试网 API Key）"""
-    print("\n" + "═" * 60)
-    print("  演示：多时间框架信号引擎")
-    print("═" * 60)
-
-    API_KEY = os.getenv("BINANCE_TESTNET_API_KEY", "")
-    API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET", "")
-
+def run_backtest():
+    """回测入口"""
     if not API_KEY:
-        print("  未设置 API Key，跳过")
+        print("未设置 API Key")
         return
 
     from binance.client import Client
-    from core.signal_engine import SignalEngine
+    from core.backtest import Backtester
+
+    print("\n" + "═" * 60)
+    print("  回测模式")
+    print("═" * 60)
 
     client = Client(API_KEY, API_SECRET, testnet=True)
-    engine = SignalEngine(client, "BTCUSDT")
-    result = engine.analyze()
+    backtester = Backtester(
+        client=client,
+        symbol="BTCUSDT",
+        min_confidence=30,
+        max_hold_candles=20,
+    )
 
-    print(result.analysis_summary)
-    print(f"\n→ 置信度 {result.confidence_score} 将传入风控层")
-    if result.confidence_score >= 65:
-        print("→ 置信度达标，可以进入风控评估流程")
-    else:
-        print("→ 置信度不足，系统建议等待更清晰的信号")
+    # 分别回测 1h 和 15m
+    for tf in ["1h", "15m"]:
+        result = backtester.run(timeframe=tf, days=180)
+        backtester.print_report(result, tf)
 
 
 if __name__ == "__main__":
-    # # 演示1：风控逻辑验证（始终运行，不需要 API Key）
-    # demo_risk_calculations()
-
-    # # 演示2：完整流程空跑
-    # demo_full_flow_dry_run()
-
-    # # 演示3：真实测试网下单（需要 API Key）
-    # demo_real_trading()
-
-    # print("\n" + "═" * 60)
-    # print("  下一步：")
-    # print("  1. 申请币安测试网 API Key 跑通真实下单流程")
-    # print("  2. 开发多时间框架信号引擎（15m/1h/4h）")
-    # print("  3. 接入宏观数据和链上数据")
-    # print("  4. 集成 Claude API 生成分析报告")
-    # print("═" * 60 + "\n")
-    demo_signal_engine()
+    run()
+    # run_backtest()

@@ -10,6 +10,7 @@ from typing import Optional
 from binance.client import Client
 
 from core.market_analyzer import MarketAnalyzer, FrameAnalysis, Signal, MarketState
+from core.macro_analyzer import MacroAnalyzer, MacroAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +73,14 @@ class SignalEngine:
         self.analyzers = {
             tf: MarketAnalyzer(client, symbol, tf) for tf in ["1d", "4h", "1h", "15m"]
         }
+        self.macro_analyzer = MacroAnalyzer()
 
     def analyze(self) -> SignalResult:
         """执行完整的多时间框架分析，返回 SignalResult"""
         logger.info(f"开始分析 {self.symbol} 多时间框架信号...")
 
+        # ── 宏观数据分析 ──────────────────────────────────────────────
+        macro: MacroAnalysis = self.macro_analyzer.analyze()
         # ── 各时间框架独立分析 ────────────────────────────────────────
         results = {}
         for tf, analyzer in self.analyzers.items():
@@ -113,55 +117,71 @@ class SignalEngine:
         else:
             direction = Signal.NEUTRAL
 
-        # ── 置信度计算 ────────────────────────────────────────────────
-        # 基础分：方向一致性（0-50分）
+        # ── 置信度计算（重新校准）────────────────────────────────────
         signals = [f.signal for f in results.values() if f is not None]
         long_count = signals.count(Signal.LONG)
         short_count = signals.count(Signal.SHORT)
         neutral_count = signals.count(Signal.NEUTRAL)
-        dominant_count = max(long_count, short_count)
         total_signals = len(signals)
 
-        # 一致性得分：dominant占比越高分越高
-        consistency_ratio = dominant_count / total_signals if total_signals > 0 else 0
-        base_score = consistency_ratio * 50
+        # 确定主方向票数
+        dominant_count = long_count if direction == Signal.LONG else short_count
 
-        # 方向强度加分（0-20分）：各时间框架的平均信号强度
+        # 基础分：主方向框架占比（0-40分）
+        # 4个框架全部一致=40分，3个=30分，2个=20分，1个=10分
+        base_score = (dominant_count / total_signals) * 40 if total_signals > 0 else 0
+
+        # 信号强度加分（0-25分）：取主方向框架的平均强度
+        direction_frames = [f for f in results.values() if f and f.signal == direction]
         avg_strength = (
-            sum(f.strength for f in results.values() if f) / total_signals
-            if total_signals > 0
+            sum(f.strength for f in direction_frames) / len(direction_frames)
+            if direction_frames
             else 0
         )
-        strength_bonus = avg_strength * 20
+        strength_bonus = avg_strength * 25
 
-        # 高权重框架对齐加分（0-15分）：日线和4小时同向额外加分
+        # 短线框架对齐加分（0-20分）：1小时和15分钟是实际入场的框架
+        h1_aligned = h1 and h1.signal == direction
+        m15_aligned = m15 and m15.signal == direction
+        entry_alignment_bonus = 0
+        if h1_aligned and m15_aligned:
+            entry_alignment_bonus = 20  # 入场框架完全一致
+        elif h1_aligned or m15_aligned:
+            entry_alignment_bonus = 10  # 入场框架部分一致
+
+        # 高权重框架对齐加分（0-10分）：日线和4小时同向
         alignment_bonus = 0
-        if (
-            daily
-            and h4
-            and daily.signal == h4.signal
-            and daily.signal != Signal.NEUTRAL
-        ):
-            alignment_bonus += 10
-        if h4 and h1 and h4.signal == h1.signal and h4.signal != Signal.NEUTRAL:
-            alignment_bonus += 5
+        if daily and h4 and daily.signal == h4.signal and daily.signal == direction:
+            alignment_bonus = 10
+        elif h4 and h4.signal == direction:
+            alignment_bonus = 5
 
-        # 冲突检测
+        # 冲突扣分（每个冲突-8分）
         timeframe_conflicts = []
         if (
             daily
             and h4
             and daily.signal != Signal.NEUTRAL
             and h4.signal != Signal.NEUTRAL
+            and daily.signal != h4.signal
         ):
-            if daily.signal != h4.signal:
-                timeframe_conflicts.append("日线与4小时方向相反")
-        if h4 and h1 and h4.signal != Signal.NEUTRAL and h1.signal != Signal.NEUTRAL:
-            if h4.signal != h1.signal:
-                timeframe_conflicts.append("4小时与1小时方向相反")
-        if h1 and m15 and h1.signal != Signal.NEUTRAL and m15.signal != Signal.NEUTRAL:
-            if h1.signal != m15.signal:
-                timeframe_conflicts.append("1小时与15分钟方向相反")
+            timeframe_conflicts.append("日线与4小时方向相反")
+        if (
+            h4
+            and h1
+            and h4.signal != Signal.NEUTRAL
+            and h1.signal != Signal.NEUTRAL
+            and h4.signal != h1.signal
+        ):
+            timeframe_conflicts.append("4小时与1小时方向相反")
+        if (
+            h1
+            and m15
+            and h1.signal != Signal.NEUTRAL
+            and m15.signal != Signal.NEUTRAL
+            and h1.signal != m15.signal
+        ):
+            timeframe_conflicts.append("1小时与15分钟方向相反")
 
         internal_conflicts = [tf for tf, f in results.items() if f and f.conflict]
         if internal_conflicts:
@@ -170,30 +190,48 @@ class SignalEngine:
         conflict_penalty = len(timeframe_conflicts) * 8
         has_major_conflict = len(timeframe_conflicts) >= 2
 
-        # 高波动扣分
+        # 高波动扣分（-10分，从15降低，避免过度惩罚）
         volatile_frames = [
             f for f in results.values() if f and f.market_state == MarketState.VOLATILE
         ]
-        volatile_penalty = 15 if volatile_frames else 0
+        volatile_penalty = 10 if volatile_frames else 0
 
         # 插针扣分
         recent_spike = (m15 and m15.has_spike) or (h1 and h1.has_spike)
         spike_penalty = 5 if recent_spike else 0
 
-        # 中性信号过多扣分（超过一半是 NEUTRAL 说明市场无方向）
-        neutral_penalty = 10 if neutral_count >= total_signals / 2 else 0
+        # 中性信号过多扣分（超过一半才扣，且只扣5分）
+        neutral_penalty = 5 if neutral_count > total_signals / 2 else 0
 
-        # 最终置信度
-        confidence = int(
+        # 宏观评分调节（-15 到 +15 分）
+        macro_bonus = int(macro.score / 100 * 15)
+
+        # 宏观方向与技术方向相反时额外扣分
+        if direction == Signal.LONG and macro.direction == "BEARISH":
+            macro_bonus -= 10
+        elif direction == Signal.SHORT and macro.direction == "BULLISH":
+            macro_bonus -= 10
+
+        # Risk-Off 环境下做多额外扣分
+        if direction == Signal.LONG and not macro.risk_on:
+            macro_bonus -= 5
+
+        # 技术面置信度
+        technical_confidence = int(
             base_score
             + strength_bonus
+            + entry_alignment_bonus
             + alignment_bonus
             - conflict_penalty
             - volatile_penalty
             - spike_penalty
             - neutral_penalty
         )
-        confidence = max(0, min(100, confidence))
+        technical_confidence = max(0, min(100, technical_confidence))
+
+        # 宏观调节：最多影响±20分
+        macro_adjustment = max(-20, min(20, macro_bonus))
+        confidence = max(0, min(100, technical_confidence + macro_adjustment))
 
         # ── 止损止盈建议 ──────────────────────────────────────────────
         # 综合多个时间框架的支撑压力位
@@ -239,7 +277,7 @@ class SignalEngine:
         summary_lines = [
             f"交易对：{self.symbol}",
             f"当前价格：{entry_price:.2f}",
-            f"最终方向：{direction.name}（置信度 {confidence}/100）",
+            f"最终方向：{direction.name}（置信度 {confidence}/100，技术面 {technical_confidence}/100）",
             f"主导市场状态：{dominant_state}",
             "",
             "各时间框架信号：",
@@ -255,6 +293,9 @@ class SignalEngine:
             summary_lines.append("\n检测到的信号冲突：")
             for c in timeframe_conflicts:
                 summary_lines.append(f"  ⚠ {c}")
+
+        summary_lines.append(f"\n宏观环境：")
+        summary_lines.append(macro.summary)
 
         summary_lines += [
             f"\n建议止损：{suggested_sl:.2f}（距入场 {abs(suggested_sl-entry_price)/entry_price:.2%}）",

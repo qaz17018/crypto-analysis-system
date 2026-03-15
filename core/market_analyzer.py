@@ -214,8 +214,12 @@ class MarketAnalyzer:
         # ADX(14) — 趋势强度 - 动态获取 ADX 主线列
         adx_df = ta.adx(high, low, close, length=14)
         if adx_df is not None and not adx_df.empty:
-            # 匹配以 'ADX' 开头的列名（区分于 DPM 或 DMN）
-            adx_col = [col for col in adx_df.columns if col.startswith("ADX")][0]
+            adx_col = [
+                col
+                for col in adx_df.columns
+                if col == "ADX_14"
+                or (col.startswith("ADX_") and not col.startswith("ADXR"))
+            ][0]
             adx = float(adx_df[adx_col].iloc[-1])
         else:
             adx = 20.0
