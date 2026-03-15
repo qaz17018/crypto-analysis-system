@@ -47,7 +47,7 @@ def run():
     print("  第一步：多时间框架信号分析")
     print("═" * 60)
 
-    symbol = "ETHUSDT"  # 可以改成 ETHUSDT 测试
+    symbol = "BTCUSDT"  # 改这里切换交易对，如 ETHUSDT
     engine = SignalEngine(client, symbol)
     signal_result: SignalResult = engine.analyze()
 
