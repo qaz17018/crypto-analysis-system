@@ -125,13 +125,24 @@ class MarketAnalyzer:
 
     def _filter_spikes(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        插针过滤：检测并标记异常K线
-        不删除数据，只标记 is_spike 列，指标计算时可选择忽略
+        插针过滤：只标记极端异常K线
+        条件：影线超过实体5倍，且价格偏离20周期均值超过3个标准差
         """
         body = (df["close"] - df["open"]).abs()
         wick = df["high"] - df["low"]
-        # 影线超过实体3倍，且实体本身不为0
-        df["is_spike"] = (wick > body * 3) & (body > 0)
+
+        # 条件1：影线超过实体5倍（从3倍提高到5倍）
+        wick_ratio = (wick > body * 5) & (body > 0)
+
+        # 条件2：收盘价偏离20周期滚动均值超过3个标准差
+        roll_mean = df["close"].rolling(20).mean()
+        roll_std = df["close"].rolling(20).std()
+        z_score = ((df["close"] - roll_mean) / roll_std).abs()
+        z_extreme = z_score > 3.0
+
+        # 两个条件同时满足才算插针
+        df["is_spike"] = wick_ratio & z_extreme
+
         spike_count = df["is_spike"].sum()
         if spike_count > 0:
             logger.info(f"{self.timeframe} 检测到 {spike_count} 根插针K线")
@@ -185,26 +196,36 @@ class MarketAnalyzer:
 
         # ── 计算技术指标 ──────────────────────────────────────────────
 
-        # RSI(14)
+        # ── 计算技术指标 ──────────────────────────────────────────────
+
+        # RSI(14) - RSI返回的是Series，没有列名问题，保持原样
         rsi_series = ta.rsi(close, length=14)
         rsi = float(rsi_series.iloc[-1]) if rsi_series is not None else 50.0
 
-        # MACD(12,26,9)
+        # MACD(12,26,9) - 动态获取 Histogram (柱状图) 列
         macd_df = ta.macd(close, fast=12, slow=26, signal=9)
-        macd_hist = (
-            float(macd_df["MACDh_12_26_9"].iloc[-1]) if macd_df is not None else 0.0
-        )
+        if macd_df is not None and not macd_df.empty:
+            # 匹配以 'MACDh' 开头的列名（忽略后面的参数后缀）
+            hist_col = [col for col in macd_df.columns if col.startswith("MACDh")][0]
+            macd_hist = float(macd_df[hist_col].iloc[-1])
+        else:
+            macd_hist = 0.0
 
-        # ADX(14) — 趋势强度
+        # ADX(14) — 趋势强度 - 动态获取 ADX 主线列
         adx_df = ta.adx(high, low, close, length=14)
-        adx = float(adx_df["ADX_14"].iloc[-1]) if adx_df is not None else 20.0
+        if adx_df is not None and not adx_df.empty:
+            # 匹配以 'ADX' 开头的列名（区分于 DPM 或 DMN）
+            adx_col = [col for col in adx_df.columns if col.startswith("ADX")][0]
+            adx = float(adx_df[adx_col].iloc[-1])
+        else:
+            adx = 20.0
 
-        # ATR(14) — 波动率
+        # ATR(14) — 波动率 - 返回的是Series，保持原样
         atr_series = ta.atr(high, low, close, length=14)
         atr = float(atr_series.iloc[-1]) if atr_series is not None else 0.0
         atr_pct = atr / float(close.iloc[-1])
 
-        # EMA200 — 长期趋势方向
+        # EMA200 — 长期趋势方向 - 返回的是Series，保持原样
         ema200 = ta.ema(close, length=200)
         above_ema200 = (
             float(close.iloc[-1]) > float(ema200.iloc[-1])
@@ -212,17 +233,19 @@ class MarketAnalyzer:
             else True
         )
 
-        # EMA50 — 中期趋势
+        # EMA50 — 中期趋势 - 返回的是Series，保持原样
         ema50 = ta.ema(close, length=50)
         above_ema50 = (
             float(close.iloc[-1]) > float(ema50.iloc[-1]) if ema50 is not None else True
         )
 
-        # 布林带(20,2) — 价格相对位置
+        # 布林带(20,2) — 价格相对位置 - 动态获取上下轨
         bb_df = ta.bbands(close, length=20, std=2)
-        if bb_df is not None:
-            bb_lower = float(bb_df["BBL_20_2.0"].iloc[-1])
-            bb_upper = float(bb_df["BBU_20_2.0"].iloc[-1])
+        if bb_df is not None and not bb_df.empty:
+            lower_col = [col for col in bb_df.columns if col.startswith("BBL")][0]
+            upper_col = [col for col in bb_df.columns if col.startswith("BBU")][0]
+            bb_lower = float(bb_df[lower_col].iloc[-1])
+            bb_upper = float(bb_df[upper_col].iloc[-1])
             bb_range = bb_upper - bb_lower
             bb_position = (
                 (float(close.iloc[-1]) - bb_lower) / bb_range if bb_range > 0 else 0.5

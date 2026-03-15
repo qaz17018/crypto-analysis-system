@@ -114,15 +114,37 @@ class SignalEngine:
             direction = Signal.NEUTRAL
 
         # ── 置信度计算 ────────────────────────────────────────────────
-        # 基础分（0-60）
-        base_score = abs(normalized_score) * 60
-
-        # 一致性加分（最多25分）
+        # 基础分：方向一致性（0-50分）
         signals = [f.signal for f in results.values() if f is not None]
         long_count = signals.count(Signal.LONG)
         short_count = signals.count(Signal.SHORT)
+        neutral_count = signals.count(Signal.NEUTRAL)
         dominant_count = max(long_count, short_count)
-        consistency_bonus = (dominant_count / len(signals)) * 25 if signals else 0
+        total_signals = len(signals)
+
+        # 一致性得分：dominant占比越高分越高
+        consistency_ratio = dominant_count / total_signals if total_signals > 0 else 0
+        base_score = consistency_ratio * 50
+
+        # 方向强度加分（0-20分）：各时间框架的平均信号强度
+        avg_strength = (
+            sum(f.strength for f in results.values() if f) / total_signals
+            if total_signals > 0
+            else 0
+        )
+        strength_bonus = avg_strength * 20
+
+        # 高权重框架对齐加分（0-15分）：日线和4小时同向额外加分
+        alignment_bonus = 0
+        if (
+            daily
+            and h4
+            and daily.signal == h4.signal
+            and daily.signal != Signal.NEUTRAL
+        ):
+            alignment_bonus += 10
+        if h4 and h1 and h4.signal == h1.signal and h4.signal != Signal.NEUTRAL:
+            alignment_bonus += 5
 
         # 冲突检测
         timeframe_conflicts = []
@@ -141,12 +163,11 @@ class SignalEngine:
             if h1.signal != m15.signal:
                 timeframe_conflicts.append("1小时与15分钟方向相反")
 
-        # 指标内部冲突
         internal_conflicts = [tf for tf, f in results.items() if f and f.conflict]
         if internal_conflicts:
             timeframe_conflicts.append(f"{','.join(internal_conflicts)} 指标内部冲突")
 
-        conflict_penalty = len(timeframe_conflicts) * 10
+        conflict_penalty = len(timeframe_conflicts) * 8
         has_major_conflict = len(timeframe_conflicts) >= 2
 
         # 高波动扣分
@@ -156,15 +177,21 @@ class SignalEngine:
         volatile_penalty = 15 if volatile_frames else 0
 
         # 插针扣分
-        spike_penalty = 5 if any(f.has_spike for f in results.values() if f) else 0
+        recent_spike = (m15 and m15.has_spike) or (h1 and h1.has_spike)
+        spike_penalty = 5 if recent_spike else 0
+
+        # 中性信号过多扣分（超过一半是 NEUTRAL 说明市场无方向）
+        neutral_penalty = 10 if neutral_count >= total_signals / 2 else 0
 
         # 最终置信度
         confidence = int(
             base_score
-            + consistency_bonus
+            + strength_bonus
+            + alignment_bonus
             - conflict_penalty
             - volatile_penalty
             - spike_penalty
+            - neutral_penalty
         )
         confidence = max(0, min(100, confidence))
 
