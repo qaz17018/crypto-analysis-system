@@ -210,8 +210,9 @@ class BinanceFuturesExecutor:
                 side=close_side,
                 type="STOP_MARKET",
                 stopPrice=sl_str,
-                closePosition="true",     # 平掉全部仓位（字符串格式）
-                workingType="MARK_PRICE", # 标记价格触发，防止插针误触
+                quantity=qty_str,
+                reduceOnly="true",
+                workingType="MARK_PRICE",
             )
             # 测试网条件单返回 algoId，正式网返回 orderId，兼容两种格式
             order_id = sl.get('orderId') or sl.get('algoId') or sl.get('order_id') or 'unknown'
@@ -244,7 +245,8 @@ class BinanceFuturesExecutor:
                 side=close_side,
                 type="TAKE_PROFIT_MARKET",
                 stopPrice=tp_str,
-                closePosition="true",
+                quantity=qty_str,
+                reduceOnly="true",
                 workingType="MARK_PRICE",
             )
             tp_order = OrderResult(
